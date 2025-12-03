@@ -40,27 +40,87 @@ exports.loginMember = async (req, res) => {
 };
 
 // 🔹 GET MEMBERS (role-based)
+// 🔹 GET MEMBERS (role-based) -- updated to support query params like ?leaderId=... and ?role=leader
 exports.getMembers = async (req, res) => {
-    try {
-        const { id, role } = req.user;
-        let members = [];
+  try {
+    const { id: requesterId, role: requesterRole } = req.user; // dari auth middleware
+    const { leaderId: qLeaderId, role: qRole } = req.query;    // query params
 
-        if (role === "admin") {
-            members = await Member.findAll({ order: [["id_member", "DESC"]] });
-        } else if (role === "senior_leader") {
-            members = await Member.findAll({ where: { id_senior: id }, order: [["id_member", "DESC"]] });
-        } else if (role === "leader") {
-            members = await Member.findAll({ where: { id_leader: id }, order: [["id_member", "DESC"]] });
-        } else if (role === "member") {
-            members = await Member.findAll({ where: { id_member: id } });
+    let members = [];
+
+    // --- 1) Jika ada query leaderId -> kembalikan member bawahannya (dengan pengecekan akses) ---
+    if (qLeaderId) {
+      const leaderId = Number(qLeaderId);
+
+      // pastikan leader itu memang ada dan memang jabatan 'leader'
+      const leaderRecord = await Member.findOne({ where: { id_member: leaderId } });
+      if (!leaderRecord) {
+        return res.status(404).json({ message: "Leader tidak ditemukan" });
+      }
+
+      // cek jabatan (kadang data inconsistent, tapi idealnya jabatan === 'leader')
+      // kita tidak menolak jika jabatan bukan 'leader' tapi cek akses berbasis relasi
+      // cek hak akses requester
+      if (requesterRole === "admin") {
+        // admin boleh
+      } else if (requesterRole === "senior_leader") {
+        // senior hanya boleh lihat bawahan leader jika leaderRecord.id_senior === requesterId
+        if (Number(leaderRecord.id_senior) !== Number(requesterId)) {
+          return res.status(403).json({ message: "Tidak punya akses melihat member untuk leader ini" });
         }
+      } else if (requesterRole === "leader") {
+        // leader hanya boleh meminta bawahannya sendiri
+        if (Number(leaderId) !== Number(requesterId)) {
+          return res.status(403).json({ message: "Leader hanya boleh melihat member bawahan sendiri" });
+        }
+      } else {
+        // member atau lain-lain tidak diizinkan
+        return res.status(403).json({ message: "Tidak punya akses" });
+      }
 
-        res.json({ members });
+      // ambil semua member yang punya id_leader = leaderId
+      members = await Member.findAll({
+        where: { id_leader: leaderId },
+        order: [["id_member", "DESC"]]
+      });
 
-    } catch (err) {
-        res.status(500).json({ message: "Server error", error: err.message });
+      return res.json({ members });
     }
+
+    // --- 2) Jika query role=leader (frontend ingin daftar leaders) ---
+    if (qRole === "leader") {
+      if (requesterRole === "admin") {
+        members = await Member.findAll({ where: { jabatan: "leader" }, order: [["id_member", "DESC"]] });
+      } else if (requesterRole === "senior_leader") {
+        members = await Member.findAll({ where: { jabatan: "leader", id_senior: requesterId }, order: [["id_member", "DESC"]] });
+      } else {
+        // leader/member tidak boleh mengambil daftar leaders umum
+        return res.status(403).json({ message: "Tidak punya akses melihat daftar leader" });
+      }
+
+      return res.json({ members });
+    }
+
+    // --- 3) Fallback: tetap dukung behavior lama (role-based default) ---
+    if (requesterRole === "admin") {
+      members = await Member.findAll({ order: [["id_member", "DESC"]] });
+    } else if (requesterRole === "senior_leader") {
+      members = await Member.findAll({ where: { id_senior: requesterId }, order: [["id_member", "DESC"]] });
+    } else if (requesterRole === "leader") {
+      members = await Member.findAll({ where: { id_leader: requesterId }, order: [["id_member", "DESC"]] });
+    } else if (requesterRole === "member") {
+      members = await Member.findAll({ where: { id_member: requesterId } });
+    } else {
+      members = [];
+    }
+
+    return res.json({ members });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Server error", error: err.message });
+  }
 };
+
 
 // 🔹 CREATE MEMBER (role-based)
 exports.createMember = async (req, res) => {
